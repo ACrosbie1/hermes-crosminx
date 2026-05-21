@@ -2,14 +2,13 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y \
-    git curl build-essential ripgrep \
-    && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir uv && \
-    uv pip install --system hermes-agent[all]
+RUN pip install --no-cache-dir anthropic python-telegram-bot
+
+COPY hermes_bot.py .
 
 ENV TELEGRAM_TOKEN=""
 ENV ANTHROPIC_API_KEY=""
 
-CMD ["hermes", "gateway", "start", "--telegram"]
+CMD ["python", "hermes_bot.py"]
