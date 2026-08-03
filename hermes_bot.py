@@ -1,8 +1,16 @@
 import os
 import asyncio
+import logging
 import anthropic
 from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
+from telegram.request import HTTPXRequest
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
+logger = logging.getLogger("hermes")
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -93,13 +101,45 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"Error: {str(e)}")
 
-def main():
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Catch-all so a transient network error never kills the whole app.
+    Without this, PTB logs 'No error handlers are registered' and the
+    process can go silent for good (this was the root cause of the crashes)."""
+    logger.warning(f"Handled error, staying alive: {context.error}")
+
+def build_app():
+    # Longer timeouts + PTB's own get_updates retry loop, tuned to survive
+    # flaky egress instead of raising all the way up to the process.
+    request = HTTPXRequest(
+        connect_timeout=15.0,
+        read_timeout=30.0,
+        write_timeout=15.0,
+        pool_timeout=15.0,
+    )
+    app = Application.builder().token(TELEGRAM_TOKEN).request(request).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("clear", clear))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    print("Hermes CrosMinX Bot starting with prompt caching + conversation memory...")
-    app.run_polling(drop_pending_updates=True)
+    app.add_error_handler(error_handler)
+    return app
+
+def main():
+    """Supervisor loop: if polling ever dies anyway (e.g. DNS blip that
+    outlives PTB's internal retry), rebuild the Application and restart
+    instead of leaving the container silent until someone restarts it by hand."""
+    backoff = 5
+    while True:
+        try:
+            app = build_app()
+            logger.info("Hermes CrosMinX Bot starting with prompt caching + conversation memory...")
+            app.run_polling(drop_pending_updates=True)
+            # run_polling returned cleanly (e.g. graceful shutdown) — stop.
+            break
+        except Exception as e:
+            logger.error(f"Polling crashed: {e}. Restarting in {backoff}s...")
+            import time
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 120)  # exponential backoff, capped at 2min
 
 if __name__ == "__main__":
     main()
